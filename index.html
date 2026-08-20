@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Bus Line & Station Delay Map</title>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+  <style>
+    body { margin: 0; padding: 0; font-family: sans-serif; }
+    #map { height: 100vh; width: 100vw; }
+    
+    .map-control-box {
+      background: white;
+      padding: 12px 14px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      line-height: 24px;
+      min-width: 180px;
+    }
+
+    .legend-title {
+      font-weight: bold;
+      margin-bottom: 6px;
+      display: block;
+      font-size: 14px;
+    }
+
+    /* Styles the circular color indicators */
+    .filter-item i {
+      width: 12px;
+      height: 12px;
+      display: inline-block;
+      margin-right: 6px;
+      border-radius: 50%;
+      vertical-align: middle;
+    }
+
+    .filter-item {
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .filter-item input {
+      margin-right: 6px;
+      cursor: pointer;
+    }
+
+    .line-select {
+      width: 100%;
+      padding: 6px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      font-size: 13px;
+      margin-bottom: 8px;
+      outline: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <script>
+    // 1. Initialize Leaflet map centered on Münster
+    const map = L.map('map').setView([51.9607, 7.6261], 12);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // 2. Define Category Colors
+    const categories = {
+      '< 0 (Early/On-time)': '#2ECC71', // Green
+      '0-5 (Slight)':        '#F1C40F', // Yellow
+      '5-10 (Moderate)':     '#E67E22', // Orange
+      '10-15 (High)':        '#E74C3C', // Red
+      '15+ (Severe)':        '#8E44AD'  // Purple
+    };
+
+    // Global state holders
+    let allData = [];
+    const markerGroup = L.layerGroup().addTo(map);
+    let activeCategories = new Set(Object.keys(categories));
+    let selectedLine = "ALL";
+
+    // 3. Create Combined Control Box
+    const filterControl = L.control({ position: 'topright' });
+
+    filterControl.onAdd = function () {
+      const div = L.DomUtil.create('div', 'map-control-box');
+      
+      // Stop map zoom/pan when interacting with controls inside the box
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+
+      div.innerHTML = `
+        <span class="legend-title">Filter by Bus Line</span>
+        <select id="line-select" class="line-select">
+          <option value="ALL">All Lines</option>
+        </select>
+        <span class="legend-title" style="margin-top: 8px;">Delay Categories</span>
+      `;
+
+      // Build category checkboxes with color circles
+      Object.keys(categories).forEach(cat => {
+        const item = document.createElement('div');
+        item.className = 'filter-item';
+        item.innerHTML = `
+          <input type="checkbox" checked id="chk_${cat}">
+          <i style="background: ${categories[cat]};"></i>
+          <label for="chk_${cat}" style="cursor: pointer;">${cat}</label>
+        `;
+
+        // Checkbox listener
+        item.querySelector('input').addEventListener('change', (e) => {
+          if (e.target.checked) {
+            activeCategories.add(cat);
+          } else {
+            activeCategories.delete(cat);
+          }
+          updateMapMarkers();
+        });
+
+        div.appendChild(item);
+      });
+
+      // Dropdown listener
+      div.querySelector('#line-select').addEventListener('change', (e) => {
+        selectedLine = e.target.value;
+        updateMapMarkers();
+      });
+
+      return div;
+    };
+
+    // Add control box to map
+    filterControl.addTo(map);
+
+    // 4. Render / Update Markers based on Filters
+    function updateMapMarkers() {
+      markerGroup.clearLayers();
+
+      allData.forEach(row => {
+        if (!row.latitude || !row.longitude) return;
+
+        const catGroup = row.delay_group || row.station_delay_group;
+        const lineMatch = (selectedLine === "ALL" || String(row.linientext) === selectedLine);
+        const categoryMatch = activeCategories.has(catGroup);
+
+        if (lineMatch && categoryMatch) {
+          const markerColor = categories[catGroup] || row.delay_color || row.station_color || '#95a5a6';
+
+          const marker = L.circleMarker([row.latitude, row.longitude], {
+            radius: 6,
+            fillColor: markerColor,
+            color: "#ffffff",
+            weight: 1,
+            fillOpacity: 0.85
+          });
+
+          marker.bindPopup(`
+            <b>Station ID:</b> ${row.akthst}<br>
+            ${row.linientext ? `<b>Bus Line:</b> ${row.linientext}<br>` : ''}
+            <b>Avg Delay:</b> ${parseFloat(row.avg_delay).toFixed(2)} min<br>
+            <b>Median Delay:</b> ${parseFloat(row.median_delay).toFixed(2)} min<br>
+            <b>High Delay % (>5m):</b> ${parseFloat(row.pct_high_delay).toFixed(1)}%<br>
+            <b>Total Trips:</b> ${row.total_trips}<br>
+            <b>Category:</b> ${catGroup}
+          `);
+
+          marker.addTo(markerGroup);
+        }
+      });
+    }
+
+    // 5. Load CSV File and Populate Controls
+    Papa.parse('NEW_station_line_delay_summary_with_coords.csv', {
+      download: true,
+      header: true,
+      dynamicTyping: true,
+      complete: function(results) {
+        allData = results.data;
+
+        // Extract unique bus lines for dropdown
+        const lineSet = new Set();
+        allData.forEach(r => {
+          if (r.linientext !== undefined && r.linientext !== null) {
+            lineSet.add(String(r.linientext));
+          }
+        });
+
+        // Sort bus lines naturally
+        const sortedLines = Array.from(lineSet).sort((a, b) => 
+          a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+        );
+
+        // Populate dropdown options
+        const lineSelect = document.getElementById('line-select');
+        if (lineSelect) {
+          sortedLines.forEach(line => {
+            const opt = document.createElement('option');
+            opt.value = line;
+            opt.textContent = `Line ${line}`;
+            lineSelect.appendChild(opt);
+          });
+        }
+
+        // Initial map load
+        updateMapMarkers();
+      }
+    });
+  </script>
+</body>
+</html>
